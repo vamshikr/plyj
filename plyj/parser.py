@@ -6,6 +6,10 @@ from .model import *
 
 class MyLexer(object):
 
+    states = (
+        ('java8', 'exclusive'),
+    )
+
     keywords = ('this', 'class', 'void', 'super', 'extends', 'implements', 'enum', 'interface',
                 'byte', 'short', 'int', 'long', 'char', 'float', 'double', 'boolean', 'null',
                 'true', 'false',
@@ -35,7 +39,9 @@ class MyLexer(object):
 
         'PLUSPLUS', 'MINUSMINUS',
 
-        'ELLIPSIS'
+        'ELLIPSIS',
+        'BODY',
+        #'OPEN_BRACE', 'CLOSE_BRACE',
     ] + [k.upper() for k in keywords]
     literals = '()+-*/=?:,.^|&~!=[]{};<>@%'
 
@@ -43,11 +49,10 @@ class MyLexer(object):
     t_CHAR_LITERAL = r'\'([^\\\n]|(\\.))*?\''
     t_STRING_LITERAL = r'\"([^\\\n]|(\\.))*?\"'
 
-    t_ignore_LINE_COMMENT = '//.*'
-
-    def t_BLOCK_COMMENT(self, t):
-        r'/\*(.|\n)*?\*/'
-        t.lexer.lineno += t.value.count('\n')
+    #t_ANY_ignore_LINE_COMMENT = '//.*'
+    #t_ignore_LINE_COMMENT = '//.*'
+    t_ANY_ignore = ' \t\f'
+    #t_java8_ignore = r'[^\{\}]+'
 
     t_OR = r'\|\|'
     t_AND = '&&'
@@ -78,7 +83,6 @@ class MyLexer(object):
 
     t_ELLIPSIS = r'\.\.\.'
 
-    t_ignore = ' \t\f'
 
     def t_NAME(self, t):
         '[A-Za-z_$][A-Za-z0-9_$]*'
@@ -86,15 +90,64 @@ class MyLexer(object):
             t.type = t.value.upper()
         return t
 
-    def t_newline(self, t):
+    def t_ANY_newline(self, t):
         r'\n+'
         t.lexer.lineno += len(t.value)
 
-    def t_newline2(self, t):
+    def t_ANY_newline2(self, t):
         r'(\r\n)+'
         t.lexer.lineno += len(t.value) / 2
 
-    def t_error(self, t):
+    def t_OPEN_BRACE(self, t):
+        r'\{'
+        t.lexer.level = 1
+        t.lexer.push_state('java8')
+        t.type = '{'
+        return t
+
+    def t_java8_OPEN_BRACE(self, t):
+        r'\{'
+        t.lexer.level += 1
+        #print("Reaches here: OPEN_BRACE", t.lexer.level)
+
+    def t_java8_CLOSE_BRACE(self, t):
+        r'\}'
+        t.lexer.level -= 1
+        #print("Reaches here: CLOSE_BRACE", t.lexer.level)
+
+        if t.lexer.level == 0:
+            t.type = 'CLOSE_BRACE'
+            t.lexer.begin('INITIAL')
+            t.type = '}'
+            return t
+
+    def t_ANY_BLOCK_COMMENT(self, t):
+        r'/\*(.|\n)*?\*/'
+        t.lexer.lineno += t.value.count('\n')
+
+    def t_ANY_LINE_COMMENT(self, t):
+        r'//.*'
+        #print("Reaches here: LINE_COMMENT", t.value)
+        pass
+
+    def t_java8_BODY(self, t):
+        r'[^\'\"\{\}\r\n\/]+'
+        #print("Reaches here: BODY", t.value)
+        pass
+
+    def t_java8_FORWORD_SLASH(self, t):
+        r'\/'
+        pass
+
+    def t_java8_CHAR_LITERAL(self, t):
+        r'\'([^\\\n]|(\\.))*?\''
+        pass
+
+    def t_java8_STRING_LITERAL(self, t):
+        r'\"([^\\\n]|(\\.))*?\"'
+        pass
+
+    def t_ANY_error(self, t):
         print("Illegal character '{}' ({}) in line {}".format(t.value[0], hex(ord(t.value[0])), t.lexer.lineno))
         t.lexer.skip(1)
 
@@ -1952,7 +2005,8 @@ class CompilationUnitParser(object):
         '''import_declaration : single_type_import_declaration
                               | type_import_on_demand_declaration
                               | single_static_import_declaration
-                              | static_import_on_demand_declaration'''
+                              | static_import_on_demand_declaration
+                              | empty_statement'''
         p[0] = p[1]
 
     def p_single_type_import_declaration(self, p):
@@ -2003,18 +2057,36 @@ class MyParser(ExpressionParser, NameParser, LiteralParser, TypeParser, ClassPar
 
 class Parser(object):
 
-    def __init__(self):
+    def old__init__(self):
         self.lexer = lex.lex(module=MyLexer(), optimize=1)
         self.parser = yacc.yacc(module=MyParser(), start='goal', optimize=1)
+
+    def __init__(self, logger):
+
+        self.lexer = lex.lex(module=MyLexer(),
+                             optimize=1,
+                             lextab='plyj_lextab',
+                             nowarn=1,
+                             debuglog=None,
+                             errorlog=logger)
+
+        self.parser = yacc.yacc(module=MyParser(),
+                                debug=0,
+                                start='goal',
+                                optimize=1,
+                                tabmodule='plyj_parsetab',
+                                debugfile='plyj_parser.out',
+                                debuglog=None,
+                                errorlog=logger)
 
     def tokenize_string(self, code):
         self.lexer.input(code)
         for token in self.lexer:
             print(token)
 
-    def tokenize_file(self, _file):
+    def tokenize_file(self, _file, encoding):
         if type(_file) == str:
-            _file = open(_file)
+            _file = open(_file, encoding=encoding)
         content = ''
         for line in _file:
             content += line
@@ -2030,10 +2102,12 @@ class Parser(object):
         self.lexer.lineno = lineno
         return self.parser.parse(prefix + code, lexer=self.lexer, debug=debug)
 
-    def parse_file(self, _file, debug=0):
+    def parse_file(self, _file, encoding, debug=0):
         if type(_file) == str:
-            _file = open(_file)
-        content = _file.read()
+            _file = open(_file, mode='r', encoding=encoding)
+        content = ''
+        for line in _file:
+            content += line
         return self.parse_string(content, debug=debug)
 
 if __name__ == '__main__':
@@ -2055,4 +2129,5 @@ if __name__ == '__main__':
         t = parser.parse(expr, lexer=lexer, debug=1)
         print('result: {}'.format(t))
         print('--------------------------------')
+
 
